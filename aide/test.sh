@@ -1,0 +1,2 @@
+export DEEPSEEK_API_KEY=sk-f7b23761e596404599cdb42e09c0c469
+aide data_dir="example_tasks/tabular-playground-series-may-2022/prepared/public" doc_base_dir="example_tasks/tabular-playground-series-may-2022/docs" desc_file="example_tasks/tabular-playground-series-may-2022/description.md"

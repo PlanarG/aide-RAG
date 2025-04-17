@@ -15,8 +15,8 @@ import logging
 
 from aide.journal import Journal, filter_journal
 
-from . import tree_export
-from . import copytree, preproc_data, serialize
+from aide.utils import tree_export
+from aide.utils import copytree, preproc_data, serialize
 
 shutup.mute_warnings()
 logger = logging.getLogger("aide")
@@ -36,6 +36,13 @@ class SearchConfig:
     max_debug_depth: int
     debug_prob: float
     num_drafts: int
+
+@dataclass
+class RetrieverConfig:
+    embed_model: str
+    max_chunk_size: int
+    chunk_overlap: int
+    k: int
 
 
 @dataclass
@@ -64,6 +71,7 @@ class ExecConfig:
 @dataclass
 class Config(Hashable):
     data_dir: Path
+    doc_base_dir: Path
     desc_file: Path | None
 
     goal: str | None
@@ -80,6 +88,7 @@ class Config(Hashable):
 
     exec: ExecConfig
     agent: AgentConfig
+    retriever: RetrieverConfig
 
 
 def _get_next_logindex(dir: Path) -> int:

@@ -2,6 +2,7 @@ import atexit
 import logging
 import shutil
 import sys
+import torch
 
 from . import backend
 
@@ -90,6 +91,7 @@ def journal_to_string_tree(journal: Journal) -> str:
 
 
 def run():
+    torch.multiprocessing.set_start_method("spawn", force=True)
     cfg = load_cfg()
     log_format = "[%(asctime)s] %(levelname)s: %(message)s"
     logging.basicConfig(
@@ -188,7 +190,7 @@ def run():
             title=f'[b]AIDE is working on experiment: [bold green]"{cfg.exp_name}[/b]"',
             subtitle="Press [b]Ctrl+C[/b] to stop the run",
         )
-
+    
     while global_step < cfg.agent.steps:
         agent.step(exec_callback=exec_callback)
         # on the last step, print the tree

@@ -44,16 +44,23 @@ agent:
 
   # LLM settings for coding
   code:
-    model: gpt-4-turbo
+    model: deepseek-chat
     temp: 0.5
 
   # LLM settings for evaluating program output / tracebacks
   feedback:
-    model: gpt-4-turbo
+    model: deepseek-chat
     temp: 0.5
 
   # hyperparameters for the tree search
   search:
     max_debug_depth: 3
     debug_prob: 0.5
-    num_drafts: 5
+    num_drafts: 3
+
+# LLM settings for RAG
+retriever:
+  embed_model: intfloat/multilingual-e5-large-instruct
+  max_chunk_size: 800
+  chunk_overlap: 50
+  k: 3

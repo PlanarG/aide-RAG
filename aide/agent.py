@@ -2,7 +2,7 @@ import shutil
 import logging
 import random
 import time
-from typing import Any, Callable, cast
+from typing import Any, Callable, List, cast
 
 import humanize
 from .backend import FunctionSpec, compile_prompt_to_md, query
@@ -11,7 +11,8 @@ from .journal import Journal, Node
 from .utils import data_preview
 from .utils.config import Config
 from .utils.metric import MetricValue, WorstMetricValue
-from .utils.response import extract_code, extract_text_up_to_code, wrap_code
+from .utils.response import extract_code, extract_text_up_to_code, wrap_code, wrap_retrieved_results, extract_query
+from .retriever import Retriever
 
 logger = logging.getLogger("aide")
 
@@ -82,6 +83,9 @@ class Agent:
         self.data_preview: str | None = None
         self.start_time = time.time()
         self.current_step = 0
+
+        self.kernel_retriever     = Retriever(cfg=cfg, doc_dir=cfg.doc_base_dir / "kernels")
+        self.discussion_retriever = Retriever(cfg=cfg, doc_dir=cfg.doc_base_dir / "discussions")
 
     def search_policy(self) -> Node | None:
         """Select a node to work on (or None to draft a new node)."""
@@ -174,12 +178,35 @@ class Agent:
         return {"Implementation guideline": impl_guideline}
 
     @property
-    def _prompt_resp_fmt(self):
+    def _implementation_prompt_resp_fmt(self):
         return {
             "Response format": (
                 "Your response should be a brief outline/sketch of your proposed solution in natural language (3-5 sentences), "
                 "followed by a single markdown code block (wrapped in ```) which implements this solution and prints out the evaluation metric. "
                 "There should be no additional headings or text in your response. Just natural language text followed by a newline and then the markdown code block. "
+            )
+        }
+
+    @property
+    def _retrieve_prompt_resp_fmt(self):
+        return {
+            "Response format": (
+                "Your response should be a brief explanation of your query to the forum in natural language (3-5 sentences), "
+                "followed by a single markdown code block (wrapped in ```) which contains your query. For example, \n```\nYour Query\n```\n"
+                "There should be no additional headings or text in your response. Just natural language text followed by a newline and then the markdown code block. "
+                "The query should be a single line of text, without any newlines or special characters. "
+                "If you don't want to query the forum, the code block should be empty. e.g.: \n```\n\n```\n "
+            )
+        }
+
+    @property
+    def _inital_retrieve_prompt_resp_fmt(self):
+        return {
+            "Response format": (
+                "Your response should be a brief explanation of your query to the forum in natural language (3-5 sentences), "
+                "followed by a single markdown code block (wrapped in ```) which contains your query. "
+                "There should be no additional headings or text in your response. Just natural language text followed by a newline and then the markdown code block. "
+                "Each line of your query should be an **id** of a document. Do not include any other text or special characters. "
             )
         }
 
@@ -206,7 +233,87 @@ class Agent:
         logger.info("Final plan + code extraction attempt failed, giving up...")
         return "", completion_text  # type: ignore
 
+    def retrieve_query(self, prompt, retries=3) -> str:
+        completion_text = None
+        for _ in range(retries):
+            completion_text = query(
+                system_message=prompt,
+                user_message=None,
+                model=self.acfg.code.model,
+                temperature=self.acfg.code.temp,
+                convert_system_to_user=self.acfg.convert_system_to_user,
+            )
+            logger.debug(f"{completion_text}")
+            query_prompt = extract_query(completion_text)
+            if query_prompt:
+                return query_prompt
+
+            logger.info("Query extraction failed, retrying...")
+        
+        logger.info("Final query extraction attempt failed, giving up...")
+        return ""
+
+    def _retrieve(self, node: Node, draft: bool=False) -> tuple[str, str]:
+        if self.acfg.obfuscate:
+            introduction = "You are an expert machine learning engineer attempting a task. " 
+        else:
+            introduction = "You are a Kaggle grandmaster attending a competition. " 
+
+        if draft:
+            introduction += (
+                "In order to win this competition, you need to come up with an excellent and creative plan "
+                "for a solution and then implement this solution in Python. "
+            )
+        else:
+            introduction += "You are provided with a previously developed solution below and should improve it. "
+
+        introduction += (
+            "Before you do so, you should query the forum for relevant information. "
+            "We will now provide a description of the task. "
+        )
+
+        prompt = {
+            "introduction": introduction,
+            "task description": self.task_desc,
+            "Memory": self.journal.generate_summary(),
+            "Instructions": {},
+        }
+    
+        if not draft:
+            prompt["Previous solution"] = wrap_code(node.code)
+            if node.is_buggy:
+                prompt["Execution ouput"] = wrap_code(node.term_out, lang="")
+        else:
+            hottest_list = self.kernel_retriever.get_hotest_docs() + self.discussion_retriever.get_hotest_docs()
+            prompt["Hottest discussions and kernels"] = (
+                "format: Title - ID - Votes \n"
+                + "\n".join([f"{title} - {id_} - {votes}" for title, id_, votes in hottest_list])
+            )
+
+        prompt["Instructions"] |= self._retrieve_prompt_resp_fmt if not draft else self._inital_retrieve_prompt_resp_fmt
+
+        if self.acfg.data_preview:
+            prompt["Data Overview"] = self.data_preview
+        
+        query = self.retrieve_query(prompt)
+        logger.debug(f"Query: {query}")
+        if draft:
+            response = []
+            for id_ in query.splitlines():
+                logger.info(f"Querying for document {id_}.")
+                response += self.kernel_retriever.get_relevant_docs(id_, by="id")
+                response += self.discussion_retriever.get_relevant_docs(id_, by="id")
+            query = "IDs of the documents to retrieve:\n" + query
+        else:
+            response = []
+            response += self.kernel_retriever.get_relevant_docs(query, by="content")
+            response += self.discussion_retriever.get_relevant_docs(query, by="content")
+        
+        return self.parse_retrieved_result(query, response)
+
     def _draft(self) -> Node:
+        query, response = self._retrieve(None, draft=True)
+
         introduction = (
             "You are a Kaggle grandmaster attending a competition. "
             "In order to win this competition, you need to come up with an excellent and creative plan "
@@ -224,7 +331,14 @@ class Agent:
             "Memory": self.journal.generate_summary(),
             "Instructions": {},
         }
-        prompt["Instructions"] |= self._prompt_resp_fmt
+
+        if query is not None and response is not None:
+            prompt["Previous Q&A"] = {
+                "Query": query,
+                "Response": response,
+            }
+
+        prompt["Instructions"] |= self._implementation_prompt_resp_fmt
         prompt["Instructions"] |= {
             "Solution sketch guideline": [
                 "This first solution design should be relatively simple, without ensembling or hyper-parameter optimization.",
@@ -243,11 +357,12 @@ class Agent:
             prompt["Data Overview"] = self.data_preview
 
         plan, code = self.plan_and_code_query(prompt)
-        new_node = Node(plan=plan, code=code)
+        new_node = Node(plan=plan, code=code, query=query, response=response)
         logger.info(f"Drafted new node {new_node.id}")
         return new_node
 
     def _improve(self, parent_node: Node) -> Node:
+        query, response = self._retrieve(parent_node)
         introduction = (
             "You are a Kaggle grandmaster attending a competition. You are provided with a previously developed "
             "solution below and should improve it in order to further increase the (test time) performance. "
@@ -267,11 +382,18 @@ class Agent:
             "Memory": self.journal.generate_summary(),
             "Instructions": {},
         }
+
+        if query is not None and response is not None:
+            prompt["Previous Q&A"] = {
+                "Query": query,
+                "Response": response,
+            }
+
         prompt["Previous solution"] = {
             "Code": wrap_code(parent_node.code),
         }
 
-        prompt["Instructions"] |= self._prompt_resp_fmt
+        prompt["Instructions"] |= self._implementation_prompt_resp_fmt
         prompt["Instructions"] |= {
             "Solution improvement sketch guideline": [
                 "The solution sketch should be a brief natural language description of how the previous solution can be improved.",
@@ -285,11 +407,12 @@ class Agent:
         prompt["Instructions"] |= self._prompt_impl_guideline
 
         plan, code = self.plan_and_code_query(prompt)
-        new_node = Node(plan=plan, code=code, parent=parent_node)
+        new_node = Node(plan=plan, code=code, parent=parent_node, query=query, response=response)
         logger.info(f"Improved node {parent_node.id} to create new node {new_node.id}")
         return new_node
 
     def _debug(self, parent_node: Node) -> Node:
+        query, response = self._retrieve(parent_node)
         introduction = (
             "You are a Kaggle grandmaster attending a competition. "
             "Your previous solution had a bug and/or did not produce a submission.csv, "
@@ -312,7 +435,14 @@ class Agent:
             "Execution output": wrap_code(parent_node.term_out, lang=""),
             "Instructions": {},
         }
-        prompt["Instructions"] |= self._prompt_resp_fmt
+
+        if query is not None and response is not None:
+            prompt["Previous Q&A"] = {
+                "Query": query,
+                "Response": response,
+            }
+
+        prompt["Instructions"] |= self._implementation_prompt_resp_fmt
         prompt["Instructions"] |= {
             "Bugfix improvement sketch guideline": [
                 "You should write a brief natural language description (3-5 sentences) of how the issue in the previous implementation can be fixed.",
@@ -325,7 +455,7 @@ class Agent:
             prompt["Data Overview"] = self.data_preview
 
         plan, code = self.plan_and_code_query(prompt)
-        new_node = Node(plan=plan, code=code, parent=parent_node)
+        new_node = Node(plan=plan, code=code, parent=parent_node, query=query, response=response)
         logger.info(f"Debugged node {parent_node.id} to create new node {new_node.id}")
         return new_node
 
@@ -391,6 +521,37 @@ class Agent:
                 logger.info(f"Node {result_node.id} is not the best node")
                 logger.info(f"Node {best_node.id} is still the best node")
         self.current_step += 1
+    
+    def parse_retrieved_result(self, question: str, retrieved_result: List[str]) -> tuple[str, str]:
+        if len(retrieved_result) == 0:
+            logger.info("No relevant results found, skipping this step")
+            return None, None
+
+        introduction = (
+            "You are a Kaggle grandmaster attending a competition. "
+            "You have queried the discussion forum for relevant information and now need to analyze the results. "
+            "For the participants' discussions, you should summarise their core ideas as well as their conclusions. "
+            "For the contestants' code, you should summarise the fundamental concepts and salient details. "
+            "Summarise each result in 2-3 sentences, and be sure to include the most important details. "
+        )
+
+        prompt = {
+            "Introduction": introduction,
+            "Task description": self.task_desc,
+            "Query": question,
+            "Results": wrap_retrieved_results(retrieved_result),
+        }
+
+        completion_text = query(
+            system_message=prompt,
+            user_message=None,
+            model=self.acfg.feedback.model,
+            temperature=self.acfg.feedback.temp,
+            convert_system_to_user=self.acfg.convert_system_to_user,
+        )
+
+        return question, completion_text
+
 
     def parse_exec_result(self, node: Node, exec_result: ExecutionResult) -> Node:
         logger.info(f"Agent is parsing execution results for node {node.id}")

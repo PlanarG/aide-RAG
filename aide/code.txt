@@ -1,0 +1,176 @@
+import os
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import roc_auc_score
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms, models
+from PIL import Image
+from tqdm import tqdm
+
+# Set random seed for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+
+# Configuration
+BATCH_SIZE = 64
+EPOCHS = 1
+IMG_SIZE = 32
+N_FOLDS = 5
+LR = 0.001
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+print(DEVICE)
+
+# Data paths
+TRAIN_DIR = "./input/train"
+TEST_DIR = "./input/test"
+TRAIN_CSV = "./input/train.csv"
+TEST_CSV = "./input/sample_submission.csv"
+
+# Create submission directory if not exists
+os.makedirs("./submission", exist_ok=True)
+
+# Load data
+train_df = pd.read_csv(TRAIN_CSV)
+test_df = pd.read_csv(TEST_CSV)
+
+
+# Define dataset class
+class CactusDataset(Dataset):
+    def __init__(self, df, img_dir, transform=None):
+        self.df = df
+        self.img_dir = img_dir
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.img_dir, self.df.iloc[idx, 0])
+        image = Image.open(img_name)
+        label = self.df.iloc[idx, 1]
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
+
+
+# Data augmentation
+train_transform = transforms.Compose(
+    [
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ]
+)
+
+val_transform = transforms.Compose(
+    [
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ]
+)
+
+# Initialize k-fold
+skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+oof_preds = np.zeros(len(train_df))
+test_preds = np.zeros(len(test_df))
+
+
+# Model definition
+def get_model():
+    model = models.efficientnet_b0(pretrained=True)
+    model.classifier[1] = nn.Linear(model.classifier[1].in_features, 1)
+    return model.to(DEVICE)
+
+
+# Training loop
+for fold, (train_idx, val_idx) in enumerate(
+    skf.split(train_df, train_df["has_cactus"])
+):
+    print(f"\nFold {fold + 1}")
+
+    # Split data
+    train_fold = train_df.iloc[train_idx]
+    val_fold = train_df.iloc[val_idx]
+
+    print("OK1")
+
+    # Create datasets and loaders
+    train_dataset = CactusDataset(train_fold, TRAIN_DIR, train_transform)
+    val_dataset = CactusDataset(val_fold, TRAIN_DIR, val_transform)
+
+    print("OK2")
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+    print("OK3")
+
+    # Initialize model and optimizer
+    model = get_model()
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=LR)
+
+    print("OK4")
+
+    # Training
+    model.train()
+    for epoch in range(EPOCHS):
+        print(epoch)
+        running_loss = 0.0
+        for images, labels in tqdm(train_loader, desc=f"Epoch {epoch + 1}"):
+            images, labels = images.to(DEVICE), labels.float().to(DEVICE)
+
+            optimizer.zero_grad()
+            outputs = model(images).squeeze()
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+
+        print(f"Loss: {running_loss / len(train_loader):.4f}")
+
+    # Validation
+    model.eval()
+    val_preds = []
+    val_labels = []
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images, labels = images.to(DEVICE), labels.float().to(DEVICE)
+            outputs = model(images).squeeze()
+            val_preds.extend(torch.sigmoid(outputs).cpu().numpy())
+            val_labels.extend(labels.cpu().numpy())
+
+    oof_preds[val_idx] = val_preds
+    fold_score = roc_auc_score(val_labels, val_preds)
+    print(f"Fold {fold + 1} ROC AUC: {fold_score:.4f}")
+
+    # Test predictions
+    test_dataset = CactusDataset(test_df, TEST_DIR, val_transform)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+    fold_test_preds = []
+    with torch.no_grad():
+        for images, _ in test_loader:
+            images = images.to(DEVICE)
+            outputs = model(images).squeeze()
+            fold_test_preds.extend(torch.sigmoid(outputs).cpu().numpy())
+
+    test_preds += np.array(fold_test_preds) / N_FOLDS
+
+# Overall validation score
+val_score = roc_auc_score(train_df["has_cactus"], oof_preds)
+print(f"\nOverall ROC AUC: {val_score:.4f}")
+
+# Create submission
+submission = pd.DataFrame({"id": test_df["id"], "has_cactus": test_preds})
+submission.to_csv("./submission/submission.csv", index=False)
+print("Submission file created!")

@@ -18,14 +18,15 @@ from .interpreter import ExecutionResult
 from .utils.metric import MetricValue
 from .utils.response import trim_long_string
 
-
 @dataclass(eq=False)
 class Node(DataClassJsonMixin):
     """A single node in the solution tree. Contains code, execution results, and evaluation information."""
 
-    # ---- code & plan ----
+    # ---- node info ----
     code: str
-    plan: str = field(default=None, kw_only=True)  # type: ignore
+    plan: str = field(default=None, kw_only=True)  
+    query: str = field(default=None, kw_only=True)  
+    response: str = field(default=None, kw_only=True)
 
     # ---- general attrs ----
     step: int = field(default=None, kw_only=True)  # type: ignore
@@ -190,6 +191,13 @@ class Journal(DataClassJsonMixin):
             summary_part += f"Results: {n.analysis}\n"
             summary_part += f"Validation Metric: {n.metric.value}\n"
             summary.append(summary_part)
+        
+        for n in self.good_nodes:
+            if n.query is not None and n.response is not None:
+                summary_part = f"Query: {n.query}\n"
+                summary_part += f"Response: {n.response}\n"
+                summary.append(summary_part)
+
         return "\n-------------------------------\n".join(summary)
 
 

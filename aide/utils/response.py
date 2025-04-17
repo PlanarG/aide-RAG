@@ -3,10 +3,15 @@ import re
 
 import black
 
+from typing import List
+
 
 def wrap_code(code: str, lang="python") -> str:
     """Wraps code with three backticks."""
     return f"```{lang}\n{code}\n```"
+
+def wrap_retrieved_results(doc: List[str]) -> str:
+    return "\n<------ Retrieved Results Splitter ------>\n".join(doc)
 
 
 def is_valid_python_script(script):
@@ -51,6 +56,10 @@ def trim_long_string(string, threshold=5100, k=2500):
     else:
         return string
 
+def extract_query(text):
+    matches = re.findall(r"```\n([\s\S]*?)\n```", text, re.DOTALL)
+    if len(matches) > 0:
+        return matches[-1]
 
 def extract_code(text):
     """Extract python code blocks from the text."""

@@ -165,6 +165,7 @@ class Interpreter:
         # - event_outq: receive events from child (e.g. state:ready, state:finished)
         # trunk-ignore(mypy/var-annotated)
         self.code_inq, self.result_outq, self.event_outq = Queue(), Queue(), Queue()
+        
         self.process = Process(
             target=self._run_session,
             args=(self.code_inq, self.result_outq, self.event_outq),
@@ -232,6 +233,7 @@ class Interpreter:
                 exc_info={},
                 exc_stack=[],
             )
+        
         assert state[0] == "state:ready", state
         start_time = time.time()
 
@@ -293,6 +295,8 @@ class Interpreter:
             output.append(self.result_outq.get())
         output.pop()  # remove the EOF marker
 
+        logger.info("Summarizing REPL execution result")
+
         e_cls_name, exc_info, exc_stack = state[1:]
 
         if e_cls_name == "TimeoutError":
@@ -304,3 +308,10 @@ class Interpreter:
                 f"Execution time: {humanize.naturaldelta(exec_time)} seconds (time limit is {humanize.naturaldelta(self.timeout)})."
             )
         return ExecutionResult(output, exec_time, e_cls_name, exc_info, exc_stack)
+
+if __name__ == '__main__':
+    interpreter = Interpreter(working_dir="/home/planarg/aideml/aide/workspaces/adept-jovial-wren")
+    with open("code.txt", "r") as f:
+        code = f.read()
+    res = interpreter.run(code)
+    print(res)
