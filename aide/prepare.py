@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import List
+from datetime import datetime
 import json
+import pandas as pd
 
 def read_raw_markdown(file_path: Path) -> str:
     with open(file_path, "r", encoding='utf-8') as f:
@@ -74,36 +76,90 @@ def read_config(file_path: Path, type: str="discussion") -> dict:
                 "title": entry["title"],
                 "votes": entry["votes"] if "votes" in entry else 0,
                 "id": str(entry["id"]),
+                "time": entry["postDate"]
             }
         elif type == "kernel":
-            result[entry["scriptVersionId"]] = {
+            result[str(entry["scriptVersionId"])] = {
                 "title": entry["title"],
                 "votes": entry["totalVotes"] if "totalVotes" in entry else 0,
-                "id": entry["scriptVersionId"],
+                "id": str(entry["scriptVersionId"]),
+                "time": entry["scriptVersionDateCreated"]
             }
     return result
-    
-if __name__ == "__main__":
-    path = Path("/home/planarg/aideml/aide/example_tasks/tabular-playground-series-may-2022/scripts")
-    output_path = Path("/home/planarg/aideml/aide/example_tasks/tabular-playground-series-may-2022/docs/kernels")
-    output_path.mkdir(parents=True, exist_ok=True)
-    files = Path(path).glob("*")
 
-    for file in files:
-        content = None
-        if file.suffix == ".json":
-            content = read_discussion(file)
-        elif file.suffix == ".ipynb":
-            content = read_jupyter_notebook(file)
+def str_to_datetime(date_str: str) -> datetime:
+    """ Convert a string to a datetime object. """
+    return pd.to_datetime(date_str).to_pydatetime()
+
+def mv_kernels(ddl: datetime, path: Path, output_path: Path):
+    """ Move the kernels to the output path. """
+    if not path.exists() or not path.is_dir():
+        raise ValueError(f"Document directory {path} does not exist or is not a directory.")
+    
+    if not output_path.exists():
+        output_path.mkdir(parents=True, exist_ok=True)
+
+    cfg = read_config(path.parent / "kernels.json", type="kernel")
+
+    for file in path.glob("*"):
+        assert file.suffix == ".ipynb"
+
+        create_time = str_to_datetime(cfg[file.stem]["time"])
+        if create_time > ddl:
+            cfg.pop(file.stem)
+            continue
+
+        content = read_jupyter_notebook(file)
         
         if content:
             with open(output_path / f"{file.stem}.txt", "w", encoding='utf-8') as f:
                 f.write(content)
                 print(f"Saved {file} to {file.stem}.txt")
-    
+
     with open(output_path / "info.json", "w") as f:
-        json.dump(read_config(path.parent / "kernels.json", type="kernel"), f, indent=4)
+        json.dump(cfg, f, indent=4)
         print(f"Saved {output_path / 'info.json'}")
+
+def mv_discussions(ddl: datetime, path: Path, output_path: Path):
+    """ Move the discussions to the output path. """
+    if not path.exists() or not path.is_dir():
+        raise ValueError(f"Document directory {path} does not exist or is not a directory.")
+    
+    if not output_path.exists():
+        output_path.mkdir(parents=True, exist_ok=True)
+
+    cfg = read_config(path.parent / "topics.json", type="discussion")
+
+    for file in path.glob("*"):
+        assert file.suffix == ".json"
+
+        create_time = str_to_datetime(cfg[file.stem]["time"])
+        if create_time > ddl:
+            cfg.pop(file.stem)
+            continue
+
+        content = read_discussion(file)
+        
+        if content:
+            with open(output_path / f"{file.stem}.txt", "w", encoding='utf-8') as f:
+                f.write(content)
+                print(f"Saved {file} to {file.stem}.txt")
+
+    with open(output_path / "info.json", "w") as f:
+        json.dump(cfg, f, indent=4)
+        print(f"Saved {output_path / 'info.json'}")
+    
+if __name__ == "__main__":
+    base_path = Path("/data/lisijie/aide-RAG/aide/example_tasks/tabular-playground-series-may-2022")
+
+    output_base_path = base_path / "docs"
+    output_base_path.mkdir(parents=True, exist_ok=True)
+
+    with open(base_path / "info.json", "r") as f:
+        ddl = str_to_datetime(json.load(f)["deadline"])
+    
+    mv_kernels(ddl, base_path / "scripts", output_base_path / "kernels")
+    mv_discussions(ddl, base_path / "dicussions", output_base_path / "discussions")
 
         
 

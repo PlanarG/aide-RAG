@@ -532,7 +532,7 @@ class Agent:
             "You have queried the discussion forum for relevant information and now need to analyze the results. "
             "For the participants' discussions, you should summarise their core ideas as well as their conclusions. "
             "For the contestants' code, you should summarise the fundamental concepts and salient details. "
-            "Summarise each result in 2-3 sentences, and be sure to include the most important details. "
+            "Summarise each result in 4-5 sentences, and be sure to include the most important details. "
         )
 
         prompt = {

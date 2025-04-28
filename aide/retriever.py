@@ -3,6 +3,7 @@ import json
 import logging
 
 import numpy as np
+import requests
 from typing import List
 from pathlib import Path
 from tqdm import tqdm
@@ -19,6 +20,18 @@ from aide.utils.config import Config, _load_cfg
 logger = logging.getLogger("aide")
 embed_model = None
 tokenizer = None
+
+def get_embedding(inputs: List[str], batch_size=128) -> Tensor:
+    request_url = "http://localhost:8000/get_embedding"
+    headers = {"Content-Type": "application/json"}
+    data = json.dumps(inputs)
+    response = requests.post(request_url, headers=headers, data=data)
+
+    if response.status_code != 200:
+        raise ValueError(f"Failed to get embedding: {response.text}")
+
+    embedding = torch.tensor(json.loads(response.json()))
+    return embedding
 
 class Retriever:
     def _load_data_dir(self, doc_dir: Path):
@@ -47,6 +60,7 @@ class Retriever:
                 text = f.read()
             if len(text) == 0:
                 continue
+
             self.documents_by_id[doc.stem] = text
             self.documents.append(Document(
                 page_content=text, 
@@ -56,41 +70,14 @@ class Retriever:
                     "id": doc.stem
                 }
             ))
-    
-    def average_pool(self, last_hidden_states: Tensor, attention_mask: Tensor) -> Tensor:
-        last_hidden = last_hidden_states.masked_fill(~attention_mask[..., None].bool(), 0.0)
-        return last_hidden.sum(dim=1) / attention_mask.sum(dim=1)[..., None]
-    
-    def get_embedding(self, inputs: List[str], batch_size=32) -> Tensor:
-        """Get the embedding for a list of inputs."""
-        if len(inputs) > batch_size:
-            results = []
-            for i in tqdm(range(0, len(inputs), batch_size), desc="Getting embeddings"):
-                results.append(self.get_embedding(inputs[i:i + batch_size]))
-            return torch.cat(results, dim=0)
-        
-        global embed_model, tokenizer
-        batch_dict = tokenizer(inputs, max_length=512, padding=True, truncation=True, return_tensors="pt")
-        batch_dict = { k: v.to(self.device) for k, v in batch_dict.items() }
-        with torch.no_grad():
-            outputs = embed_model(**batch_dict)
-        embeddings = self.average_pool(outputs.last_hidden_state, batch_dict['attention_mask'])
-        return F.normalize(embeddings, p=2, dim=1)
 
     def __init__(self, cfg: Config, doc_dir: Path):
         self.cfg = cfg
         self.doc_dir = doc_dir
 
+        logger.info(f"Loading document directory {doc_dir}...")
+
         self._load_data_dir(doc_dir)
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        global embed_model, tokenizer
-
-        if embed_model is None:
-            embed_model = AutoModel.from_pretrained(cfg.retriever.embed_model)
-            tokenizer = AutoTokenizer.from_pretrained(cfg.retriever.embed_model)
-            embed_model.to(self.device)
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=cfg.retriever.max_chunk_size,
@@ -104,7 +91,7 @@ class Retriever:
                 self.split_docs.append(chunk)
 
         content = [split_doc.page_content for split_doc in self.split_docs]
-        self.embeddings = self.get_embedding(content)
+        self.embeddings = get_embedding(content)
 
         logger.info(f"Document directory {doc_dir} loaded with {len(self.documents)} documents.")
     
@@ -112,7 +99,7 @@ class Retriever:
         task = 'Given a web search query, retrieve relevant passages that answer the query'
         return f'Instruct: {task}\nQuery: {query}'
     
-    def get_hotest_docs(self, k = 10) -> List[tuple[str, str, int]]:
+    def get_hotest_docs(self, k = 10) -> List[str]:
         """Get the top k hottest documents based on votes."""
         if k > len(self.documents):
             raise ValueError(f"Requested {k} documents, but only {len(self.documents)} are available.")
@@ -125,13 +112,13 @@ class Retriever:
         
         results = []
         for doc in sorted_docs[:k]:
-            results.append((doc.metadata["title"], doc.metadata["id"], doc.metadata["votes"]))
+            results.append(doc.page_content)
         
         return results
 
 
     def _calc_score(self, raw_score, vote):
-        return raw_score * np.clip(np.log(np.log(vote + 1) + 1), 0.5, 1.5)
+        return raw_score * np.clip(np.log(np.log(vote + 1) + 1), 0.9, 1.1)
     
     
     def get_relevant_docs(self, query: str, by: str="content") -> List[str]:
@@ -140,7 +127,7 @@ class Retriever:
 
         if by == "content":
             query = self.get_detailed_instruct(query)
-            q_embeddings = self.get_embedding([query])
+            q_embeddings = get_embedding([query])
 
             scores = (q_embeddings @ self.embeddings.T)[0]
             raw_results = [(doc, self._calc_score(scores[id_], doc.metadata["votes"])) for id_, doc in enumerate(self.split_docs)]
@@ -170,12 +157,12 @@ class Retriever:
 
 if __name__ == '__main__':
     cfg = _load_cfg()
-    cfg.doc_base_dir = Path("/home/planarg/aideml/aide/example_tasks/aerial-cactus-identification/docs")
+    cfg.doc_base_dir = Path("/data/lisijie/aide-RAG/aide/example_tasks/tabular-playground-series-may-2022/docs")
     print(cfg.retriever)
     retriever = Retriever(cfg, cfg.doc_base_dir / "discussions")
     print(retriever.get_hotest_docs(k=5))
-    print(retriever.get_relevant_docs("How to use fastai", by="content"))
-    print(retriever.get_relevant_docs("93575", by="id"))
+    print(retriever.get_relevant_docs("Early stopping", by="content"))
+    print(retriever.get_relevant_docs("322318", by="id"))
 
 
 
